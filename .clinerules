@@ -1,0 +1,50 @@
+# Cline Rules: Past Paper Concept Analyzer
+
+## Project Patterns & Preferences
+
+### File Structure
+- `pdfs/` directory for storing all source PDFs
+- `extracted/` directory for storing extracted text
+- `db/` directory for database files
+- Main Python modules in project root
+- Configuration in separate `.env` file (not committed to version control)
+
+### Coding Style
+- PEP 8 compliance for Python code
+- Type hints for all function parameters and return values
+- Docstrings for all modules, classes, and functions
+- Use of Python 3.10+ features where appropriate
+
+### Processing Pipeline
+- Each processing step should be implemented as a separate module
+- Each module should be testable in isolation
+- Components communicate through well-defined interfaces
+- Error handling at each stage with appropriate logging
+
+### Database
+- SQLite for development, with option to switch to PostgreSQL
+- Scripts for creating and updating schema
+- Use of migrations for schema changes
+- Clear documentation of schema design
+
+### LLM Integration
+- API keys stored in environment variables
+- Parameterized prompts stored in configuration files
+- Rate limiting to manage API costs
+- Fallback mechanisms for API failures
+
+### Testing
+- Unit tests for each component
+- Integration tests for the pipeline
+- Test fixtures for sample PDFs
+- Mock LLM responses for testing
+
+### Documentation
+- README.md with setup and usage instructions
+- Detailed architecture documentation
+- Database schema documentation
+- API documentation (if applicable)
+
+
+### Running Commands
+ - You are running on NixOs, and this project has its dependencies managed using nix-shell. If you want to run any commands, get into nix-shell before running that command.

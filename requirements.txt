@@ -1,0 +1,12 @@
+sqlalchemy>=2.0.0
+PyPDF2>=3.0.0
+pdfplumber>=0.7.0
+langchain>=0.0.267
+openai>=1.0.0  # Updated for GPT-4o vision capabilities
+python-dotenv>=1.0.0
+pytesseract>=0.3.10  # Optional for OCR
+pdf2image>=1.16.0    # Optional for OCR
+Pillow>=9.0.0        # Required for image processing
+pytest>=7.0.0        # For testing
+black>=23.0.0        # For code formatting
+isort>=5.10.0        # For import sorting
