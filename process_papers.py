@@ -9,108 +9,98 @@ a simple CLI interface for running the processing pipeline.
 import argparse
 import logging
 import sys
+import time
 from typing import List, Optional
 
+import config
 from models.base import init_db
 from paper_ingestor import PaperIngestor
-from text_analyzer import TextAnalyzer
+# from pdf_processor import process_papers as process_pdf_papers
+from text_analyzer import analyze_papers
+from utils.logging_config import setup_logger
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("processing.log")],
+# Configure logger
+logger = setup_logger(
+    __name__, 
+    logging.INFO, 
+    "logs/process_papers.log"
 )
-logger = logging.getLogger(__name__)
 
 
-def run_pipeline(limit: Optional[int] = None, steps: List[str] = None):
+def run_pipeline(
+    limit: Optional[int] = None, 
+    steps: Optional[List[str]] = None,
+    pdf_only: bool = False,
+    skip_extraction: bool = False,
+):
     """
     Run the complete processing pipeline or specific steps.
 
     Args:
         limit: Optional maximum number of papers to process
-        steps: Optional list of steps to run ('ingest', 'analyze')
+        steps: Optional list of steps to run ('ingest', 'extract', 'analyze')
+        pdf_only: Only process PDFs without analyzing them
+        skip_extraction: Skip PDF text extraction, only run LLM analysis
     """
     # Default to all steps if none specified
     if not steps:
-        steps = ["ingest", "analyze"]
+        steps = ["ingest", "extract", "analyze"]
 
     logger.info(f"Starting pipeline with steps: {', '.join(steps)}")
+    start_time = time.time()
 
     # Initialize database
     init_db()
 
     # Step 1: Ingest papers
     if "ingest" in steps:
-        logger.info("Step 1: Ingesting papers")
-        ingestor = PaperIngestor()
-        papers = ingestor.process_new_papers()
-        logger.info(f"Ingested {len(papers)} new papers")
+        logger.info("Step 1: Discovering and registering new papers")
+        try:
+            ingestor = PaperIngestor()
+            papers = ingestor.process_new_papers()
+            logger.info(f"Registered {len(papers)} new papers")
+            
+            # Display the registered papers
+            if papers:
+                for paper in papers:
+                    logger.info(f"  - {paper}")
+        except Exception as e:
+            logger.error(f"Error during paper ingestion: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     # Get unprocessed papers for next steps
-    ingestor = PaperIngestor()
-    papers_to_process = ingestor.get_papers_for_processing(limit=limit)
-    logger.info(f"Found {len(papers_to_process)} papers to process")
-
-    if not papers_to_process:
-        logger.info("No papers to process, pipeline complete")
+    try:
+        ingestor = PaperIngestor()
+        papers_to_process = ingestor.get_papers_for_processing(limit=limit)
+        
+        if not papers_to_process:
+            logger.info("No papers to process, pipeline complete")
+            end_time = time.time()
+            logger.info(f"Pipeline completed in {end_time - start_time:.2f} seconds")
+            return
+            
+        logger.info(f"Found {len(papers_to_process)} papers to process")
+    except Exception as e:
+        logger.error(f"Error retrieving papers for processing: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return
 
-    # Step 2: Analyze PDFs and extract concepts
+    # Analyze PDFs and extract concepts
     if "analyze" in steps:
-        logger.info("Step 2: Analyzing PDFs directly with GPT-4o")
-        analyzer = TextAnalyzer()
+        logger.info("Analyzing PDFs with LLM to extract concepts")
+        try:
+            processed_papers = analyze_papers(limit=limit)
+            logger.info(f"Successfully analyzed {processed_papers} papers")
+        except Exception as e:
+            logger.error(f"Error during concept analysis: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
-        for paper in papers_to_process:
-            logger.info(f"Analyzing {paper}")
-
-            try:
-                # Check if PDF file exists
-                pdf_path = analyzer.get_pdf_path(paper)
-                if not pdf_path.exists():
-                    logger.warning(f"PDF file not found: {pdf_path}, skipping")
-                    continue
-
-                # Process and store concepts
-                logger.info(f"Starting concept extraction for {paper}")
-                try:
-                    concept_count = analyzer.process_and_store_concepts(paper)
-                    
-                    if concept_count > 0:
-                        logger.info(f"Extracted {concept_count} concepts from {paper}")
-                        ingestor.mark_paper_processed(paper.id)
-                    else:
-                        logger.warning(f"No concepts extracted from {paper}")
-                        
-                except Exception as inner_e:
-                    # Get detailed exception info
-                    import traceback
-                    import sys
-                    exc_type, exc_value, exc_traceback = sys.exc_info()
-                    tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-                    
-                    # Log the full traceback
-                    logger.error(f"Error in process_and_store_concepts for {paper}:")
-                    for line in tb_lines:
-                        logger.error(line.rstrip())
-                    
-                    # Examine the response if it's a JSON decoding error
-                    if "JSONDecodeError" in str(inner_e):
-                        logger.error(f"JSON parsing error. Raw exception: {repr(inner_e)}")
-                        logger.error(f"Error message content: {str(inner_e)}")
-                    
-                    raise inner_e
-
-            except Exception as e:
-                # Log detailed information about the exception
-                logger.error(f"Error analyzing {paper}: {e}")
-                
-                # Add detailed traceback
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-
-    logger.info("Pipeline complete!")
+    # Report completion
+    end_time = time.time()
+    logger.info(f"Pipeline completed in {end_time - start_time:.2f} seconds")
 
 
 def main():
@@ -121,19 +111,57 @@ def main():
 
     parser.add_argument(
         "--steps",
-        choices=["ingest", "analyze"],
+        choices=["ingest", "extract", "analyze"],
         nargs="+",
         help="Specific steps to run (default: all steps)",
     )
 
-    parser.add_argument("--limit", type=int, help="Maximum number of papers to process")
+    parser.add_argument(
+        "--limit", 
+        type=int, 
+        help="Maximum number of papers to process"
+    )
+    
+    parser.add_argument(
+        "--pdf-only",
+        action="store_true",
+        help="Only process PDFs without analyzing them"
+    )
+    
+    parser.add_argument(
+        "--skip-extraction",
+        action="store_true",
+        help="Skip PDF text extraction, only run analysis"
+    )
 
     args = parser.parse_args()
 
+    # Validate arguments
+    if args.pdf_only and args.skip_extraction:
+        print("Error: Cannot specify both --pdf-only and --skip-extraction")
+        sys.exit(1)
+    
+    if args.pdf_only and args.steps and "analyze" in args.steps:
+        print("Warning: --pdf-only flag will override 'analyze' step")
+    
+    if args.skip_extraction and args.steps and "extract" in args.steps:
+        print("Warning: --skip-extraction flag will override 'extract' step")
+
+    print(f"Starting Past Paper Concept Analyzer pipeline...")
+    
     try:
-        run_pipeline(limit=args.limit, steps=args.steps)
+        run_pipeline(
+            limit=args.limit, 
+            steps=args.steps,
+            pdf_only=args.pdf_only,
+            skip_extraction=args.skip_extraction
+        )
+        print("Processing complete!")
     except Exception as e:
-        logger.error(f"Error running pipeline: {e}")
+        logger.error(f"Unhandled error in pipeline: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        print(f"Error: {str(e)}")
         sys.exit(1)
 
 

@@ -10,4 +10,4 @@ htmlcov
 
 .env
 db/**
-pdf/*.pdf
+pdfs/*.pdf

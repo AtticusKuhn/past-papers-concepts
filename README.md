@@ -2,6 +2,10 @@
 
 A system for analyzing Cambridge Computer Science Tripos past papers to extract, store, and analyze key concepts and themes.
 
+## Overview
+
+The Past Paper Concept Analyzer is a comprehensive tool designed to analyze Cambridge Computer Science Tripos examination papers, extracting key computer science concepts and storing them in a structured database. This enables students, educators, and researchers to identify recurring themes, important topics, and changes in focus over time.
+
 ## Project Architecture: Event-Driven Processing Pipeline
 
 This project implements an event-driven processing pipeline architecture optimized for analyzing academic papers. This architecture was chosen specifically to address the unique challenges of processing examination papers with varying formats, extracting concepts using LLMs, and providing reliable analysis capabilities.
@@ -187,41 +191,179 @@ This project implements an event-driven processing pipeline architecture optimiz
 2. Create a virtual environment: `python -m venv venv`
 3. Activate the environment: `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows)
 4. Install dependencies: `pip install -r requirements.txt`
-5. Configure your `.env` file with required API keys
+5. Copy `.env.sample` to `.env` and configure your API keys
 6. Place PDF files in the `pdfs/` directory
-7. Run the pipeline: `python process_papers.py`
-8. Query concepts: `python query_concepts.py`
+7. Run the pipeline with all steps: `python process_papers.py`
+8. Query concepts: `python query_engine.py`
 
 #### Option 2: NixOS Setup
 
 1. Clone this repository
-2. Configure your `.env` file with required API keys
+2. Copy `.env.sample` to `.env` and configure your API keys
 3. Enter the development environment: `nix-shell`
 4. Place PDF files in the `pdfs/` directory
 5. Run the pipeline: `python process_papers.py`
-6. Query concepts: `python query_concepts.py`
+6. Query concepts: `python query_engine.py`
+
+### Command Line Usage
+
+The main processing script (`process_papers.py`) offers various command-line options:
+
+```
+usage: process_papers.py [-h] [--steps {ingest,extract,analyze} [{ingest,extract,analyze} ...]] [--limit LIMIT] [--pdf-only] [--skip-extraction]
+
+Process past papers and extract concepts
+
+options:
+  -h, --help            show this help message and exit
+  --steps {ingest,extract,analyze} [{ingest,extract,analyze} ...]
+                        Specific steps to run (default: all steps)
+  --limit LIMIT         Maximum number of papers to process
+  --pdf-only            Only process PDFs without analyzing them
+  --skip-extraction     Skip PDF text extraction, only run analysis
+```
+
+Examples:
+
+- Process everything: `python process_papers.py`
+- Only register new papers: `python process_papers.py --steps ingest`
+- Only extract text from PDFs: `python process_papers.py --steps extract --pdf-only`
+- Only analyze PDFs that are already processed: `python process_papers.py --steps analyze --skip-extraction`
+- Process only 2 papers: `python process_papers.py --limit 2`
 
 ## Project Structure
 
 ```
 pastpaper_concepts/
 ├── pdfs/                  # Source PDF files
-├── extracted/             # Extracted text files
+├── extracted/             # Extracted text files (JSON)
 ├── db/                    # Database files
-├── paper_ingestor.py      # Paper ingestion module
-├── pdf_processor.py       # PDF processing module
-├── text_analyzer.py       # LLM-based text analysis
-├── concept_storage.py     # Database operations
-├── query_engine.py        # Analysis and querying
+├── logs/                  # Log files directory
 ├── models/                # Data models
-├── utils/                 # Utility functions
+│   ├── __init__.py
+│   ├── base.py            # SQLAlchemy base configuration
+│   ├── concept.py         # Concept models
+│   └── paper.py           # Paper model
+├── utils/                 # Utility modules
+│   ├── __init__.py
+│   ├── db.py              # Database utilities
+│   ├── llm.py             # LLM integration utilities
+│   ├── logging_config.py  # Centralized logging configuration
+│   └── pdf.py             # PDF processing utilities
 ├── prompts/               # LLM prompt templates
-├── config.py              # Configuration management
-├── process_papers.py      # Pipeline execution script
-├── query_concepts.py      # Concept querying script
-└── tests/                 # Test suite
+│   └── concept_extraction.md  # Concept extraction prompt
+├── config.py              # Application configuration
+├── paper_ingestor.py      # Paper discovery and registration
+├── pdf_processor.py       # PDF text extraction
+├── text_analyzer.py       # LLM-based concept extraction
+├── query_engine.py        # Concept querying and analysis
+├── process_papers.py      # Main processing pipeline
+├── .env.sample            # Sample environment variables
+├── .env                   # Environment variables (not in VCS)
+├── requirements.txt       # Python dependencies
+└── shell.nix              # Nix environment definition
+```
+
+## Key Components
+
+### Utilities (`utils/`)
+
+The utilities package provides reusable functionality across the application:
+
+- **db.py**: Database connection management, transaction handling, and helper functions
+- **logging_config.py**: Centralized logging configuration for consistent logging across components
+- **pdf.py**: PDF text extraction with multiple methods and fallback strategies
+- **llm.py**: LLM integration with prompt management and response parsing
+
+### Models (`models/`)
+
+The models package defines the SQLAlchemy ORM models for the database:
+
+- **base.py**: SQLAlchemy Base class and session utilities
+- **concept.py**: Models for concepts, relationships, and occurrences 
+- **paper.py**: Model for paper metadata
+
+### Processing Pipeline
+
+- **paper_ingestor.py**: Discovers and registers new papers from the pdfs/ directory
+- **pdf_processor.py**: Extracts text from PDFs using various methods with fallbacks
+- **text_analyzer.py**: Analyzes text using LLMs to identify and extract concepts
+- **process_papers.py**: Orchestrates the complete processing pipeline
+
+### Analysis and Querying
+
+- **query_engine.py**: Provides methods to query and analyze extracted concepts
+
+## Features
+
+### Robust PDF Processing
+
+- Multiple extraction methods (pdfplumber, PyPDF2)
+- OCR support for scanned papers
+- Text preprocessing for better LLM analysis
+- Fallback mechanisms for handling extraction failures
+
+### Advanced LLM Integration
+
+- Prompt template management
+- Response validation and normalization
+- Error handling and recovery
+- Deduplication of extracted concepts
+
+### Comprehensive Logging
+
+- Component-specific log files
+- Configurable log levels
+- Detailed error tracking
+- Performance monitoring
+
+### Flexible Processing Pipeline
+
+- Modular architecture with distinct processing phases
+- Configurable processing steps
+- Batch processing with rate limiting
+- Error handling and recovery at each step
+
+### Rich Query Capabilities
+
+- Concept frequency analysis
+- Year-by-year trends
+- Related concept discovery
+- Context-aware concept searching
+
+## Configuration
+
+The application is configured through environment variables, which can be set in a `.env` file:
+
+```
+# Database configuration
+DATABASE_URL=sqlite:///db/concepts.db
+
+# LLM configuration
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-api-key-here
+OPENAI_MODEL=gpt-4o
+OPENAI_MAX_TOKENS=8192
+OPENAI_TEMPERATURE=0.0
+
+# OCR configuration (optional)
+OCR_ENABLED=false
+TESSERACT_PATH=/path/to/tesseract
+
+# Logging
+LOG_LEVEL=INFO
 ```
 
 ## Contribution & Development
 
-This project follows the patterns and preferences outlined in `.clinerules`.
+This project follows the patterns and preferences outlined in `.clinerules`. Key development guidelines include:
+
+- **Code Style**: Follow PEP 8 guidelines with type hints
+- **Documentation**: Maintain comprehensive docstrings and update README as needed
+- **Testing**: Add tests for new functionality
+- **Error Handling**: Use proper exception handling and logging
+- **Modularity**: Keep components decoupled and focused on single responsibilities
+
+## License
+
+[Add appropriate license information here]

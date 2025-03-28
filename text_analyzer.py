@@ -1,84 +1,64 @@
 """
 Text Analyzer for the Past Paper Concept Analyzer.
 
-This module handles the analysis of PDFs using LLMs to identify key concepts.
-It processes PDF files directly through GPT-4o's vision capabilities,
-and stores the extracted concepts in the database.
+This module handles the analysis of PDF files using Large Language Models to
+identify key concepts, extracts them, and stores them in the database.
 """
 
 import json
 import logging
-import re
-import time
-import base64
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-import openai
-from langchain_community.chat_models import ChatOpenAI
-# LangChain imports
-from langchain.prompts import PromptTemplate
-from langchain.schema import HumanMessage
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import config
-from models.base import get_db, init_db
+from models.base import db_session, init_db
 from models.concept import Concept, ConceptRelation, Occurrence
 from models.paper import Paper
+from utils.llm import LLMProcessor
+from utils.logging_config import setup_logger
 
-# Configure logging
-logging.basicConfig(
-    level=0,  # Changed from INFO to DEBUG to see more detailed logs
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("text_analyzer_debug.log")  # Separate log file for debugging
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Initialize OpenAI client
-openai.api_key = config.OPENAI_API_KEY
+# Configure logger with a dedicated log file
+logger = setup_logger(__name__, logging.INFO, "logs/text_analyzer.log")
 
 
 class TextAnalyzer:
     """
-    Analyzes PDF files directly using GPT-4o to identify key concepts.
+    Analyzes PDF files using Large Language Models to identify key concepts.
 
     This class is responsible for:
-    1. Processing PDF files directly through GPT-4o
-    2. Parsing responses to extract concepts
-    3. Storing concepts in the database
+    1. Processing PDF files through LLM analysis
+    2. Extracting, validating, and normalizing concepts
+    3. Storing concepts in the database with proper relationships
     """
 
-    def __init__(self, batch_size: int = None):
+    def __init__(
+        self,
+        batch_size: Optional[int] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ):
         """
         Initialize the TextAnalyzer.
 
         Args:
-            batch_size: Optional override for batch size (default from config)
+            batch_size: Maximum number of papers to process in one batch
+            model: LLM model to use (defaults to config value)
+            temperature: Temperature setting (defaults to config value)
         """
+        # Configuration
         self.pdf_dir = config.PDF_DIR
-        self.prompts_dir = config.PROMPTS_DIR
-
-        # Rate limiting and batching
         self.batch_size = batch_size or config.RATE_LIMIT_BATCH_SIZE
-
-        # Load prompt template
-        self._load_prompt_template()
-
-
-    def _load_prompt_template(self):
-        """Load the concept extraction prompt template."""
-        prompt_path = self.prompts_dir / "concept_extraction.md"
-
-        if not prompt_path.exists():
-            raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
-
-        with open(prompt_path, "r", encoding="utf-8") as file:
-            self.prompt_text = file.read()
-
-        logger.info(f"Loaded prompt template from {prompt_path}")
+        
+        # Initialize LLM processor
+        self.llm_processor = LLMProcessor(
+            model=model,
+            temperature=temperature,
+        )
+        
+        logger.info(
+            f"Initialized TextAnalyzer with model: {self.llm_processor.model}, "
+            f"batch size: {self.batch_size}"
+        )
 
     def get_pdf_path(self, paper: Paper) -> Path:
         """
@@ -92,158 +72,9 @@ class TextAnalyzer:
         """
         return self.pdf_dir / paper.filename
 
-    def encode_pdf_base64(self, pdf_path: Path) -> str:
-        """
-        Encode a PDF file as base64.
-
-        Args:
-            pdf_path: Path to the PDF file
-
-        Returns:
-            Base64-encoded PDF content
-        """
-        try:
-            with open(pdf_path, "rb") as pdf_file:
-                pdf_bytes = pdf_file.read()
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                logger.info(f"Encoded PDF {pdf_path} as base64 ({len(base64_pdf)} chars)")
-                return base64_pdf
-        except Exception as e:
-            logger.error(f"Error encoding PDF as base64: {e}")
-            raise
-    
-    def extract_concepts_from_pdf(self, pdf_path: Path) -> List[Dict[str, Any]]:
-        """
-        Extract concepts directly from a PDF file using GPT-4o.
-
-        Args:
-            pdf_path: Path to the PDF file
-
-        Returns:
-            List of extracted concepts
-        """
-        logger.info(f"Processing PDF file: {pdf_path}")
-        
-        # Encode PDF as base64
-        try:
-            base64_pdf = self.encode_pdf_base64(pdf_path)
-        except Exception as e:
-            logger.error(f"Failed to encode PDF {pdf_path}: {e}")
-            return []
-        
-        # Prepare message for GPT-4o with PDF attachment
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": self.prompt_text.replace("{text}", "in the attached PDF file")
-                    },
-                    {
-                        "type": "file",
-                        "file": {
-                            "file_data": f"data:application/pdf;base64,{base64_pdf}",
-                            "filename": pdf_path.name
-                        }
-                    }
-                ]
-            }
-        ]
-        
-        logger.debug(f"Sending GPT-4o request with PDF attachment...")
-        
-        try:
-            # Use direct OpenAI API call for GPT-4o with the PDF
-            # Using the OpenAI v1.0+ API format
-            response = openai.chat.completions.create(
-                model="gpt-4o",  # Use GPT-4o for vision capabilities
-                messages=messages,
-                temperature=config.OPENAI_TEMPERATURE,
-                max_tokens=config.OPENAI_MAX_TOKENS
-            )
-            
-            response_text = response.choices[0].message.content
-            
-            # Log the raw response for debugging
-            logger.debug(f"Raw GPT-4o response: {response_text}")
-            
-            # Extract JSON from response
-            # The LLM might include explanatory text before/after the JSON
-            json_match = re.search(r"```json\s*(.+?)\s*```", response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-                logger.debug(f"Found JSON in code block: {json_str[:100]}...")
-            else:
-                # Try to find just a JSON object if not wrapped in code blocks
-                json_match = re.search(r"(\{.*\})", response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                    logger.debug(f"Found JSON object using regex: {json_str[:100]}...")
-                else:
-                    json_str = response_text
-                    logger.debug(f"Using full response as JSON: {json_str[:100]}...")
-            
-            # Check if the JSON string appears valid before parsing
-            json_str = json_str.strip()
-            if not (json_str.startswith('{') and json_str.endswith('}')):
-                logger.warning(f"JSON string doesn't appear to be a valid object. First 100 chars: {json_str[:100]}")
-            
-            # Parse JSON response
-            try:
-                # Log the exact string we're trying to parse
-                logger.debug(f"Attempting to parse JSON string: {json_str[:100]}...")
-                
-                # Check for common JSON formatting issues
-                if json_str.startswith('\n'):
-                    logger.warning("JSON string starts with newline, attempting to clean")
-                    json_str = json_str.strip()
-                
-                data = json.loads(json_str)
-                concepts = data.get("concepts", [])
-                logger.info(f"Extracted {len(concepts)} concepts from chunk")
-                return concepts
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing LLM response as JSON: {e}")
-                logger.error(f"Failed JSON: {json_str}")
-                logger.error(f"Response: {response_text}")
-                
-                # Try a fallback approach - attempt to fix common JSON issues
-                logger.info("Attempting fallback JSON parsing...")
-                try:
-                    # Fix for partial JSON containing only "concepts": [...]
-                    if '"concepts"' in json_str and not json_str.strip().startswith('{'):
-                        fixed_json = '{' + json_str + '}'
-                        logger.debug(f"Attempting to fix JSON by wrapping in braces: {fixed_json[:100]}...")
-                        data = json.loads(fixed_json)
-                        concepts = data.get("concepts", [])
-                        logger.info(f"Fallback successful! Extracted {len(concepts)} concepts from chunk")
-                        return concepts
-                except Exception as fallback_error:
-                    logger.error(f"Fallback JSON parsing also failed: {fallback_error}")
-                
-                return []
-
-        except Exception as e:
-            logger.error(f"Error extracting concepts: {e}")
-            
-            # Get more detailed error information
-            import traceback
-            logger.error(f"Detailed error traceback: {traceback.format_exc()}")
-            
-            # Check for specific OpenAI errors
-            if "openai" in str(e).lower() or "httpstatuser" in str(e).lower():
-                logger.error(
-                    "This appears to be an OpenAI API error. "
-                    "If it's a 400 Bad Request, you may be exceeding token limits. "
-                    "Try reducing the document size or enabling chunking."
-                )
-            
-            return []
-
     def extract_concepts_from_paper(self, paper: Paper) -> List[Dict[str, Any]]:
         """
-        Extract concepts directly from a paper's PDF file.
+        Extract concepts from a paper's PDF file.
 
         Args:
             paper: Paper object
@@ -253,69 +84,111 @@ class TextAnalyzer:
         """
         # Get PDF path
         pdf_path = self.get_pdf_path(paper)
-        
+
         if not pdf_path.exists():
             logger.error(f"PDF file not found: {pdf_path}")
             return []
-        
-        # Extract concepts directly from the PDF
-        logger.info(f"Processing PDF for {paper} using GPT-4o directly")
-        all_concepts = self.extract_concepts_from_pdf(pdf_path)
-        
-        # No need to deduplicate since we're not combining chunks,
-        # but we'll keep the function call for consistency in case
-        # the LLM returns duplicates internally
-        unique_concepts = self._deduplicate_concepts(all_concepts)
 
-        logger.info(f"Extracted {len(unique_concepts)} unique concepts from {paper}")
-        return unique_concepts
+        # Extract concepts from the PDF using the LLM processor
+        logger.info(f"Processing PDF for {paper} using LLM")
+        
+        try:
+            # Extract concepts using the LLM processor
+            concepts = self.llm_processor.extract_concepts_from_pdf(
+                pdf_path, prompt_template="concept_extraction"
+            )
+            
+            # Deduplicate concepts
+            unique_concepts = self.llm_processor.deduplicate_concepts(concepts)
+            
+            # Validate and normalize concepts
+            validated_concepts = self._validate_and_normalize_concepts(unique_concepts)
+            
+            logger.info(f"Extracted {len(validated_concepts)} concepts from {paper}")
+            return validated_concepts
+            
+        except Exception as e:
+            logger.error(f"Error extracting concepts from {paper}: {str(e)}")
+            # Log more detailed error information
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return []
 
-    def _deduplicate_concepts(
+    def _validate_and_normalize_concepts(
         self, concepts: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        Deduplicate concepts by name.
-
-        If the same concept appears multiple times, combine them keeping the
-        highest confidence and all contexts.
+        Validate and normalize concepts from LLM.
+        
+        This ensures all concepts have required fields and consistent formatting.
 
         Args:
-            concepts: List of concepts to deduplicate
+            concepts: List of concepts from LLM
 
         Returns:
-            List of deduplicated concepts
+            List of validated and normalized concepts
         """
-        concept_map = {}
-
-        for concept in concepts:
-            name = concept["name"].lower()
-
-            if name in concept_map:
-                existing = concept_map[name]
-
-                # Keep highest confidence
-                existing["confidence"] = max(
-                    existing["confidence"], concept["confidence"]
-                )
-
-                # Combine contexts
-                if existing["context"] != concept["context"]:
-                    existing["context"] = (
-                        f"{existing['context']}\n\n{concept['context']}"
-                    )
-
-                # Combine related concepts
-                existing_related = set(existing["related_concepts"])
-                new_related = set(concept["related_concepts"])
-                existing["related_concepts"] = list(existing_related.union(new_related))
-            else:
-                concept_map[name] = concept
-
-        return list(concept_map.values())
+        validated = []
+        
+        for i, concept in enumerate(concepts):
+            try:
+                # Check for required fields
+                if "name" not in concept or not concept["name"]:
+                    logger.warning(f"Concept {i+1} missing name field, skipping")
+                    continue
+                    
+                # Normalize confidence value
+                if "confidence" in concept:
+                    try:
+                        confidence = float(concept["confidence"])
+                        # Ensure confidence is in range [0, 1]
+                        concept["confidence"] = max(0.0, min(1.0, confidence))
+                    except (ValueError, TypeError):
+                        concept["confidence"] = 0.8  # Default confidence
+                else:
+                    concept["confidence"] = 0.8  # Default confidence
+                
+                # Ensure required fields exist with defaults if needed
+                if "category" not in concept:
+                    concept["category"] = None
+                    
+                if "description" not in concept:
+                    concept["description"] = None
+                    
+                if "context" not in concept:
+                    concept["context"] = None
+                
+                # Normalize related concepts
+                if "related_concepts" not in concept:
+                    concept["related_concepts"] = []
+                elif not isinstance(concept["related_concepts"], list):
+                    # Convert non-list to list
+                    if isinstance(concept["related_concepts"], str):
+                        concept["related_concepts"] = [concept["related_concepts"]]
+                    else:
+                        concept["related_concepts"] = []
+                
+                # Clean related concepts - remove empty strings and duplicates
+                if concept["related_concepts"]:
+                    related = [
+                        name for name in concept["related_concepts"] 
+                        if name and isinstance(name, str)
+                    ]
+                    concept["related_concepts"] = list(set(related))
+                
+                # Add to validated list
+                validated.append(concept)
+                
+            except Exception as e:
+                logger.error(f"Error validating concept {i+1}: {str(e)}")
+                logger.debug(f"Problematic concept data: {concept}")
+        
+        logger.info(f"Validated {len(validated)} concepts out of {len(concepts)}")
+        return validated
 
     def store_concept(
         self, concept_data: Dict[str, Any], paper: Paper, db
-    ) -> Tuple[Concept, Occurrence]:
+    ) -> Tuple[Optional[Concept], Optional[Occurrence]]:
         """
         Store a concept and its occurrence in the database.
 
@@ -325,45 +198,109 @@ class TextAnalyzer:
             db: Database session
 
         Returns:
-            Tuple of (Concept, Occurrence) objects
+            Tuple of (Concept, Occurrence) objects or (None, None) on error
         """
-        # Check if concept already exists
-        name = concept_data["name"]
-        existing = db.query(Concept).filter(Concept.name == name).first()
-
-        if existing:
-            concept = existing
-            # Update fields if needed
-            if not concept.category and concept_data.get("category"):
-                concept.category = concept_data["category"]
-            if not concept.description and concept_data.get("description"):
-                concept.description = concept_data["description"]
-        else:
-            # Create new concept
-            concept = Concept(
-                name=name,
-                category=concept_data.get("category"),
-                description=concept_data.get("description"),
+        try:
+            # Extract key fields
+            name = concept_data["name"]
+            category = concept_data.get("category")
+            description = concept_data.get("description")
+            parent_concept_name = concept_data.get("parent_concept")
+            
+            # Check if concept already exists
+            existing = db.query(Concept).filter(Concept.name == name).first()
+            
+            if existing:
+                concept = existing
+                
+                # Update fields if needed and newer information is available
+                if not concept.category and category:
+                    concept.category = category
+                    
+                if not concept.description and description:
+                    concept.description = description
+                    
+                # Handle parent concept if it doesn't already have one
+                if not concept.parent_concept_id and parent_concept_name:
+                    self._set_parent_concept(concept, parent_concept_name, db)
+            else:
+                # Create new concept
+                concept = Concept(
+                    name=name,
+                    category=category,
+                    description=description,
+                )
+                db.add(concept)
+                
+                # Handle parent concept 
+                if parent_concept_name:
+                    self._set_parent_concept(concept, parent_concept_name, db)
+                
+                # Need to flush to get the ID
+                db.flush()
+            
+            # Create occurrence
+            occurrence = Occurrence(
+                concept_id=concept.id,
+                paper_id=paper.id,
+                question=self._extract_question_from_paper(paper),
+                context=concept_data.get("context"),
+                confidence=concept_data.get("confidence", 0.8),
             )
-            db.add(concept)
-            # Need to flush to get the ID
+            db.add(occurrence)
+            
+            logger.debug(f"Stored concept: {concept.name} (ID: {concept.id})")
+            return concept, occurrence
+            
+        except Exception as e:
+            logger.error(f"Error storing concept {concept_data.get('name', 'unknown')}: {str(e)}")
+            return None, None
+    
+    def _set_parent_concept(
+        self, concept: Concept, parent_name: str, db
+    ) -> None:
+        """
+        Set the parent concept for a concept.
+        
+        Args:
+            concept: Concept to set parent for
+            parent_name: Name of the parent concept
+            db: Database session
+        """
+        if not parent_name or parent_name == concept.name:
+            return
+            
+        # Find or create parent concept
+        parent = db.query(Concept).filter(Concept.name == parent_name).first()
+        
+        if not parent:
+            parent = Concept(name=parent_name)
+            db.add(parent)
             db.flush()
-
-        # Create occurrence
-        occurrence = Occurrence(
-            concept_id=concept.id,
-            paper_id=paper.id,
-            question=None,  # TODO: Extract question number if available
-            context=concept_data.get("context"),
-            confidence=concept_data.get("confidence", 1.0),
-        )
-        db.add(occurrence)
-
-        return concept, occurrence
+            logger.debug(f"Created new parent concept: {parent_name} (ID: {parent.id})")
+        
+        # Set parent relation
+        concept.parent_concept_id = parent.id
+        logger.debug(f"Set parent relation: {concept.name} -> {parent_name}")
+    
+    def _extract_question_from_paper(self, paper: Paper) -> Optional[str]:
+        """
+        Extract question information from a paper.
+        
+        Args:
+            paper: Paper object
+            
+        Returns:
+            Question identifier or None
+        """
+        # The course field currently stores question information in the format "qXX"
+        if paper.course and paper.course.startswith("q"):
+            return paper.course
+        return None
 
     def store_concept_relations(
         self, concept: Concept, related_names: List[str], db
-    ) -> List[ConceptRelation]:
+    ) -> int:
         """
         Store relations between concepts in the database.
 
@@ -373,43 +310,49 @@ class TextAnalyzer:
             db: Database session
 
         Returns:
-            List of created ConceptRelation objects
+            Number of relations created
         """
-        relations = []
-
+        if not related_names:
+            return 0
+            
+        relations_created = 0
+        
         for related_name in related_names:
-            # Skip empty names
-            if not related_name:
-                continue
-
-            # Find or create related concept
-            related = db.query(Concept).filter(Concept.name == related_name).first()
-            if not related:
-                related = Concept(name=related_name)
-                db.add(related)
-                db.flush()
-
-            # Check if relation already exists
-            existing = (
-                db.query(ConceptRelation)
-                .filter(
-                    ConceptRelation.concept1_id == concept.id,
-                    ConceptRelation.concept2_id == related.id,
+            try:
+                # Skip empty names or self-relations
+                if not related_name or related_name == concept.name:
+                    continue
+    
+                # Find or create related concept
+                related = db.query(Concept).filter(Concept.name == related_name).first()
+                if not related:
+                    related = Concept(name=related_name)
+                    db.add(related)
+                    db.flush()
+    
+                # Check if relation already exists
+                existing = (
+                    db.query(ConceptRelation)
+                    .filter(
+                        ConceptRelation.concept1_id == concept.id,
+                        ConceptRelation.concept2_id == related.id,
+                    )
+                    .first()
                 )
-                .first()
-            )
-
-            if not existing:
-                # Create new relation
-                relation = ConceptRelation(
-                    concept1_id=concept.id,
-                    concept2_id=related.id,
-                    relation_type="related",
-                )
-                db.add(relation)
-                relations.append(relation)
-
-        return relations
+    
+                if not existing:
+                    # Create new relation
+                    relation = ConceptRelation(
+                        concept1_id=concept.id,
+                        concept2_id=related.id,
+                        relation_type="related",
+                    )
+                    db.add(relation)
+                    relations_created += 1
+            except Exception as e:
+                logger.error(f"Error creating relation {concept.name} -> {related_name}: {str(e)}")
+        
+        return relations_created
 
     def process_and_store_concepts(self, paper: Paper) -> int:
         """
@@ -422,25 +365,23 @@ class TextAnalyzer:
             Number of concepts stored
         """
         # Extract concepts
-        logger.info(f"Extracting concepts from {paper}")
         try:
+            logger.info(f"Extracting concepts from {paper}")
             concepts_data = self.extract_concepts_from_paper(paper)
-            logger.info(f"Got {len(concepts_data)} raw concepts from {paper}")
-            
-            # Log sample of the first concept for debugging
-            if concepts_data:
-                sample_concept = concepts_data[0]
-                logger.debug(f"Sample concept: {json.dumps(sample_concept, indent=2)[:200]}...")
             
             if not concepts_data:
                 logger.warning(f"No concepts extracted from {paper}")
                 return 0
                 
+            logger.info(f"Extracted {len(concepts_data)} concepts from {paper}")
+            
+            # Log sample concept for debugging
+            if logger.isEnabledFor(logging.DEBUG) and concepts_data:
+                sample = json.dumps(concepts_data[0], indent=2)
+                logger.debug(f"Sample concept: {sample[:300]}...")
+                
         except Exception as e:
-            logger.error(f"Error during concept extraction for {paper}: {e}")
-            # Log the exception traceback for detailed debugging
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error during concept extraction for {paper}: {str(e)}")
             return 0
 
         # Store concepts in database
@@ -448,80 +389,55 @@ class TextAnalyzer:
         
         logger.info(f"Storing {len(concepts_data)} concepts for {paper}")
         
-        with next(get_db()) as db:
-            for i, concept_data in enumerate(concepts_data):
-                try:
-                    # Validate concept data before processing
-                    required_fields = ["name"]
-                    for field in required_fields:
-                        if field not in concept_data:
-                            logger.error(f"Missing required field '{field}' in concept data: {concept_data}")
-                            continue
-                    
-                    logger.debug(f"Processing concept {i+1}/{len(concepts_data)}: {concept_data.get('name')}")
-                    
-                    # Store concept and occurrence
-                    concept, occurrence = self.store_concept(concept_data, paper, db)
-                    
-                    # Log successful storage
-                    logger.debug(f"Stored concept: {concept.name} (ID: {concept.id})")
-
-                    # Store relations
-                    if concept_data.get("related_concepts"):
-                        logger.debug(f"Processing {len(concept_data['related_concepts'])} related concepts")
-                        relations = self.store_concept_relations(
-                            concept, concept_data["related_concepts"], db
-                        )
-                        logger.debug(f"Stored {len(relations)} concept relations")
-
-                    # Store parent relation if specified
-                    if concept_data.get("parent_concept"):
-                        parent_name = concept_data["parent_concept"]
-                        logger.debug(f"Processing parent concept: {parent_name}")
+        try:
+            with db_session() as db:
+                for i, concept_data in enumerate(concepts_data):
+                    try:
+                        # Store concept and occurrence
+                        result = self.store_concept(concept_data, paper, db)
+                        concept, occurrence = result
                         
-                        parent = (
-                            db.query(Concept)
-                            .filter(Concept.name == parent_name)
-                            .first()
-                        )
-
-                        if not parent:
-                            parent = Concept(name=parent_name)
-                            db.add(parent)
-                            db.flush()
-                            logger.debug(f"Created new parent concept: {parent_name} (ID: {parent.id})")
-
-                        concept.parent_concept_id = parent.id
-                        logger.debug(f"Set parent relation: {concept.name} -> {parent_name}")
-
-                    stored_count += 1
-                except Exception as e:
-                    logger.error(f"Error storing concept {i+1}/{len(concepts_data)}: {e}")
-                    # Include the concept data in the error log
-                    logger.error(f"Failed concept data: {concept_data}")
-                    # Log the exception traceback for detailed debugging
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    db.rollback()
-                    continue
-
-            # Commit all changes
-            try:
-                db.commit()
-                logger.info(f"Successfully committed {stored_count} concepts to database")
-            except Exception as e:
-                logger.error(f"Error committing concepts to database: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                db.rollback()
-                return 0
-
-        logger.info(f"Stored {stored_count} concepts for {paper}")
+                        if not concept or not occurrence:
+                            logger.warning(
+                                f"Failed to store concept {i+1}/{len(concepts_data)}: "
+                                f"{concept_data.get('name', 'unknown')}"
+                            )
+                            continue
+                        
+                        # Store relations
+                        related_names = concept_data.get("related_concepts", [])
+                        if related_names:
+                            relation_count = self.store_concept_relations(
+                                concept, related_names, db
+                            )
+                            logger.debug(
+                                f"Created {relation_count} relations for concept: {concept.name}"
+                            )
+                        
+                        stored_count += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing concept {i+1}: {str(e)}")
+                        continue
+                
+                logger.info(f"Successfully stored {stored_count} concepts for {paper}")
+                
+        except Exception as e:
+            logger.error(f"Database error while storing concepts: {str(e)}")
+            
         return stored_count
 
 
-def main():
-    """Run the text analyzer as a standalone script."""
+def analyze_papers(limit: Optional[int] = None) -> int:
+    """
+    Process and analyze papers.
+    
+    Args:
+        limit: Optional maximum number of papers to process
+        
+    Returns:
+        Number of successfully processed papers
+    """
     # Initialize database
     init_db()
 
@@ -529,34 +445,56 @@ def main():
     from paper_ingestor import PaperIngestor
 
     ingestor = PaperIngestor()
-    papers = ingestor.get_papers_for_processing(limit=config.RATE_LIMIT_BATCH_SIZE)
+    batch_size = limit or config.RATE_LIMIT_BATCH_SIZE
+    papers = ingestor.get_papers_for_processing(limit=batch_size)
 
     if not papers:
-        print("No papers to process.")
-        return
+        logger.info("No papers to process")
+        return 0
 
     # Process each paper
     analyzer = TextAnalyzer()
+    processed_count = 0
+    
     for paper in papers:
-        print(f"Processing {paper}...")
+        logger.info(f"Processing {paper}...")
 
         try:
             # Check if PDF file exists
             pdf_path = analyzer.get_pdf_path(paper)
             if not pdf_path.exists():
-                print(f"  PDF file not found: {pdf_path}, skipping.")
+                logger.error(f"PDF file not found: {pdf_path}, skipping")
                 continue
 
             # Process and store concepts
             concept_count = analyzer.process_and_store_concepts(paper)
-            print(f"  Stored {concept_count} concepts.")
-
-            # Mark paper as processed
+            
             if concept_count > 0:
-                ingestor.mark_paper_processed(paper.id)
-                print("  Marked as processed.")
+                # Mark paper as processed
+                if ingestor.mark_paper_processed(paper.id):
+                    logger.info(f"Marked {paper} as processed with {concept_count} concepts")
+                    processed_count += 1
+                else:
+                    logger.error(f"Failed to mark {paper} as processed")
+            else:
+                logger.warning(f"No concepts stored for {paper}, not marking as processed")
+                
         except Exception as e:
-            print(f"  Error processing paper: {e}")
+            logger.error(f"Error processing paper {paper}: {str(e)}")
+            
+            # Log detailed error information
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    logger.info(f"Successfully processed {processed_count} out of {len(papers)} papers")
+    return processed_count
+
+
+def main():
+    """Run the text analyzer as a standalone script."""
+    print("Starting text analyzer...")
+    processed_count = analyze_papers()
+    print(f"Processing complete. Processed {processed_count} papers.")
 
 
 if __name__ == "__main__":

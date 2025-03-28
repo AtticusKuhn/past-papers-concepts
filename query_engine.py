@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 from sqlalchemy import and_, desc, distinct, func, or_
 from sqlalchemy.orm import joinedload
 
-from models.base import get_db, init_db
+from models.base import db_session, init_db
 from models.concept import Concept, ConceptRelation, Occurrence
 from models.paper import Paper
 
@@ -50,7 +50,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with concept information and occurrence count
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Query for concepts with their occurrence count
             query = (
                 db.query(Concept, func.count(Occurrence.id).label("occurrence_count"))
@@ -83,7 +83,7 @@ class QueryEngine:
         Returns:
             Dictionary mapping categories to lists of concepts
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Get all concepts with a category
             concepts = db.query(Concept).filter(Concept.category.isnot(None)).all()
 
@@ -111,7 +111,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with concept information and occurrence count
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Query for concepts that appear in papers from the given year
             query = (
                 db.query(Concept, func.count(Occurrence.id).label("occurrence_count"))
@@ -146,7 +146,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with concept information and context
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Query for occurrences in the given paper
             occurrences = (
                 db.query(Occurrence)
@@ -179,7 +179,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with related concept information
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Get the concept
             concept = db.query(Concept).filter(Concept.id == concept_id).first()
             if not concept:
@@ -245,7 +245,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with matching concept information
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Search in name, category, and description
             search_pattern = f"%{query}%"
             concepts = (
@@ -284,7 +284,7 @@ class QueryEngine:
         Returns:
             Dictionary with trend data
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Get list of all years in the database
             years = [
                 year[0]
@@ -358,7 +358,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with co-occurring concept information
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Get papers where the concept occurs
             paper_ids = [
                 p_id
@@ -412,7 +412,7 @@ class QueryEngine:
         Returns:
             List of dictionaries with paper information
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             query = db.query(Paper)
 
             if year:
@@ -450,7 +450,7 @@ class QueryEngine:
         Returns:
             Dictionary with concept details
         """
-        with next(get_db()) as db:
+        with db_session() as db:
             # Get the concept
             concept = db.query(Concept).filter(Concept.id == concept_id).first()
             if not concept:
